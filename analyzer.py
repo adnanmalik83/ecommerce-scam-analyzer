@@ -1,101 +1,130 @@
-import argparse
-
+import datetime
+from urllib.parse import urlparse
+import bs4
 import requests
-from bs4 import BeautifulSoup
-import tldextract
 import whois
 
 
-def fetch_html(url, timeout=10):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=timeout)
-    response.raise_for_status()
-    return response.text
+def calculate_scam_risk(url):
+    """Analyzes a website and generates a mathematical scam risk score from 0-100."""
+    print(f"\n[+] Running Risk Assessment Engine on: {url}")
 
+    risk_score = 0
+    breakdown = []
+    metadata = {}
 
-def parse_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    title = soup.title.string.strip() if soup.title and soup.title.string else ""
-    desc_tag = soup.find("meta", attrs={"name": "description"})
-    description = desc_tag.get("content", "").strip() if desc_tag else ""
-    links = [a.get("href").strip() for a in soup.find_all("a", href=True)]
-    return {
-        "title": title,
-        "description": description,
-        "links": links,
-    }
+    # 1. Clean URL
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
 
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
 
-def extract_domain_info(url):
-    extracted = tldextract.extract(url)
-    return {
-        "subdomain": extracted.subdomain,
-        "domain": extracted.domain,
-        "suffix": extracted.suffix,
-        "registered_domain": extracted.registered_domain,
-    }
+    # 2. Check Connection Security (Weight: 15 points)
+    if parsed_url.scheme != "https":
+        risk_score += 15
+        breakdown.append("❌ Insecure Connection (No HTTPS) [+15 Risk]")
+    else:
+        metadata["Security"] = "HTTPS Enabled"
 
-
-def query_whois(domain):
+    # 3. Check Domain Age via WHOIS (Weight: 45 points)
     try:
-        data = whois.whois(domain)
-    except Exception as exc:
-        return {"error": str(exc)}
+        domain_info = whois.whois(domain)
+        creation_date = domain_info.creation_date
 
-    if isinstance(data, dict):
-        return data
+        if isinstance(creation_date, list):
+            creation_date = creation_date[0]
 
-    keys = [
-        "domain_name",
-        "registrar",
-        "whois_server",
-        "creation_date",
-        "expiration_date",
-        "updated_date",
-        "emails",
-        "name",
-        "org",
-        "address",
-        "city",
-        "state",
-        "country",
-        "zipcode",
-    ]
-    return {key: getattr(data, key, None) for key in keys}
+        if creation_date:
+            age_days = (datetime.datetime.now() - creation_date).days
+            metadata["Domain Age (Days)"] = age_days
 
+            # Brand new domains are highly dangerous
+            if age_days < 90:
+                risk_score += 45
+                breakdown.append(
+                    f"❌ Freshly Registered Domain ({age_days} days old) [+45 Risk]"
+                )
+            elif age_days < 365:
+                risk_score += 20
+                breakdown.append(
+                    f"⚠️ Relatively New Domain ({age_days} days old) [+20 Risk]"
+                )
+        else:
+            risk_score += 30
+            breakdown.append("⚠️ Domain Age hidden or unverified [+30 Risk]")
+    except Exception:
+        risk_score += 30
+        breakdown.append("⚠️ WHOIS record lookup failed/hidden [+30 Risk]")
 
-def analyze_url(url):
-    html = fetch_html(url)
-    parsed = parse_html(html)
-    domain_info = extract_domain_info(url)
-    whois_data = query_whois(domain_info["registered_domain"] or url)
-    return {
-        "url": url,
-        "domain_info": domain_info,
-        "page": parsed,
-        "whois": whois_data,
-    }
+    # 4. Text & Content Analysis (Weight: 40 points)
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = bs4.BeautifulSoup(response.text, "html.parser")
 
+        # Extract meta title
+        metadata["Page Title"] = (
+            soup.title.string.strip() if soup.title else "No Title"
+        )
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze a URL using requests, BeautifulSoup, tldextract, and python-whois."
-    )
-    parser.add_argument("url", help="URL to analyze")
-    args = parser.parse_args()
-    result = analyze_url(args.url)
+        # Look for manipulative marketing phrases
+        page_text = soup.get_text().lower()
+        scam_phrases = [
+            "90% off",
+            "liquidation sale",
+            "clearance blow-out",
+            "free luxury",
+        ]
+        found_phrases = [p for p in scam_phrases if p in page_text]
 
-    print("URL:", result["url"])
-    print("Title:", result["page"]["title"])
-    print("Description:", result["page"]["description"])
-    print("Domain:", result["domain_info"]["registered_domain"])
-    print("WHOIS registrar:", result["whois"].get("registrar"))
-    print("Creation date:", result["whois"].get("creation_date"))
-    print("Expiration date:", result["whois"].get("expiration_date"))
-    print("Emails:", result["whois"].get("emails"))
-    print("Found links:", len(result["page"]["links"]))
+        if found_phrases:
+            risk_score += 20
+            breakdown.append(
+                f"❌ Found high-pressure phrases: {found_phrases} [+20 Risk]"
+            )
+
+        # Look for missing legal protections
+        html_links = [a.get("href", "").lower() for a in soup.find_all("a")]
+        has_privacy = any("privacy" in link for link in html_links)
+        has_terms = any(
+            "terms" in link or "condition" in link for link in html_links
+        )
+
+        if not has_privacy or not has_terms:
+            risk_score += 20
+            breakdown.append(
+                "❌ Missing standard Privacy Policy or Terms links [+20 Risk]"
+            )
+
+    except Exception as e:
+        print(f"[-] Web scraping error: {e}")
+
+    # Ensure score caps safely at 100
+    risk_score = min(risk_score, 100)
+
+    # 5. Display the Visual Report Card
+    print("\n--- ANALYZER DATA ---")
+    for key, value in metadata.items():
+        print(f" • {key}: {value}")
+
+    print("\n--- RISK BREAKDOWN LOG ---")
+    for item in breakdown:
+        print(item)
+
+    print("\n--- FINAL SECURITY VERDICT ---")
+    if risk_score >= 60:
+        print(f"🚨 HIGH SCAM RISK: {risk_score}/100")
+    elif risk_score >= 30:
+        print(f"⚠️ MODERATE RISK: {risk_score}/100")
+    else:
+        print(f"✅ SAFE / LOW RISK: {risk_score}/100")
+
+    return risk_score
 
 
 if __name__ == "__main__":
-    main()
-
+    # Test your updated intelligence engine
+    calculate_scam_risk("stc.com.bh")
